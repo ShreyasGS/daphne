@@ -66,3 +66,4 @@ profiler/
 precompiled-dependencies/
 /cmake*/
 /data
+.deps/
