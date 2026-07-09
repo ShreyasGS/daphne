@@ -23,8 +23,8 @@
 #include <runtime/local/datastructures/ValueTypeCode.h>
 #include <runtime/local/io/FileMetaData.h>
 
-#include <arrow/api.h>
 #include <arrow/adapters/orc/adapter.h>
+#include <arrow/api.h>
 #include <arrow/io/file.h>
 
 #include <cstdint>
