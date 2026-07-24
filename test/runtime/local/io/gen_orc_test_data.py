@@ -134,4 +134,34 @@ write_meta(
     {"numRows": 2, "numCols": 1, "valueType": "f64"},
 )
 
+
+# ---------------------------------------------------------------------------
+# 6. Frame with mixed types including STRING columns.
+#    Doubles as the projection-happy-path fixture (four typed columns).
+# ---------------------------------------------------------------------------
+write_orc(
+    pa.table(
+        {
+            "name":   pa.array(["alice", "bob", "carol"], type=pa.string()),
+            "age":    pa.array([30, 41, 29], type=pa.int64()),
+            "dept":   pa.array(["eng", "ops", "eng"], type=pa.string()),
+            "salary": pa.array([80.5, 95.0, 72.25], type=pa.float64()),
+        }
+    ),
+    "ReadOrc_StringFrame.orc",
+)
+write_meta(
+    "ReadOrc_StringFrame.orc",
+    {
+        "numRows": 3,
+        "numCols": 4,
+        "schema": [
+            {"label": "name",   "valueType": "str"},
+            {"label": "age",    "valueType": "si64"},
+            {"label": "dept",   "valueType": "str"},
+            {"label": "salary", "valueType": "f64"},
+        ],
+    },
+)
+
 print("\nAll fixtures generated.")

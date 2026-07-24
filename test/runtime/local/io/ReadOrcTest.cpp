@@ -113,6 +113,41 @@ TEST_CASE("ReadOrc, Frame, mixed f64/si64/f64", TAG_IO) {
     DataObjectFactory::destroy(f);
 }
 
+TEST_CASE("ReadOrc, Frame with strings, mixed types", TAG_IO) {
+    ValueTypeCode schemaArr[] = {ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR, ValueTypeCode::F64};
+    std::string labelsArr[] = {"name", "age", "dept", "salary"};
+    Frame *f = DataObjectFactory::create<Frame>(3, 4, schemaArr, labelsArr, false);
+
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR, ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts;
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 3);
+    REQUIRE(f->getNumCols() == 4);
+
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "alice");
+    CHECK(f->getColumn<std::string>(0)->get(1, 0) == "bob");
+    CHECK(f->getColumn<std::string>(0)->get(2, 0) == "carol");
+
+    CHECK(f->getColumn<int64_t>(1)->get(0, 0) == 30);
+    CHECK(f->getColumn<int64_t>(1)->get(1, 0) == 41);
+    CHECK(f->getColumn<int64_t>(1)->get(2, 0) == 29);
+
+    CHECK(f->getColumn<std::string>(2)->get(0, 0) == "eng");
+    CHECK(f->getColumn<std::string>(2)->get(1, 0) == "ops");
+    CHECK(f->getColumn<std::string>(2)->get(2, 0) == "eng");
+
+    CHECK(f->getColumn<double>(3)->get(0, 0) == 80.5);
+    CHECK(f->getColumn<double>(3)->get(1, 0) == 95.0);
+    CHECK(f->getColumn<double>(3)->get(2, 0) == 72.25);
+
+    DataObjectFactory::destroy(f);
+}
+
 // ----------------------------------------------------------------------------
 // End-to-end through Read.h's dispatcher
 // ----------------------------------------------------------------------------
@@ -142,6 +177,43 @@ TEST_CASE("ReadOrc, end-to-end through Read.h, Frame", TAG_IO) {
     CHECK(f->getColumn<double>(0)->get(0, 0) == 1.1);
     CHECK(f->getColumn<int64_t>(1)->get(2, 0) == 30);
     CHECK(f->getColumn<double>(2)->get(1, 0) == 0.6);
+
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, end-to-end through Read.h, Frame with strings", TAG_IO) {
+    Frame *f = nullptr;
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+    read(f, filename, /*ctx=*/nullptr);
+
+    REQUIRE(f != nullptr);
+    REQUIRE(f->getNumRows() == 3);
+    REQUIRE(f->getNumCols() == 4);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "alice");
+    CHECK(f->getColumn<int64_t>(1)->get(1, 0) == 41);
+    CHECK(f->getColumn<std::string>(2)->get(2, 0) == "eng");
+    CHECK(f->getColumn<double>(3)->get(0, 0) == 80.5);
+
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, Frame single string column", TAG_IO) {
+    ValueTypeCode schemaArr[] = {ValueTypeCode::STR};
+    std::string labelsArr[] = {"s"};
+    Frame *f = DataObjectFactory::create<Frame>(2, 1, schemaArr, labelsArr, false);
+
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR};
+    std::vector<std::string> labels{"s"};
+    FileMetaData fmd(2, 1, false, schema, labels);
+    std::map<std::string, std::string> opts;
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringCol.orc";
+
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 2);
+    REQUIRE(f->getNumCols() == 1);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "alpha");
+    CHECK(f->getColumn<std::string>(0)->get(1, 0) == "beta");
 
     DataObjectFactory::destroy(f);
 }
@@ -177,12 +249,36 @@ TEST_CASE("ReadOrc, column count mismatch", TAG_IO) {
     DataObjectFactory::destroy(m);
 }
 
-TEST_CASE("ReadOrc, rejects string columns", TAG_IO) {
-    DenseMatrix<double> *m = nullptr;
-    FileMetaData fmd(2, 1, true, ValueTypeCode::STR);
+TEST_CASE("ReadOrc, type mismatch — file STRING, meta SI64", TAG_IO) {
+    // ReadOrc_StringCol.orc has one STRING column; meta requests SI64 → throw.
+    ValueTypeCode schemaArr[] = {ValueTypeCode::SI64};
+    std::string labelsArr[] = {"s"};
+    Frame *f = DataObjectFactory::create<Frame>(2, 1, schemaArr, labelsArr, false);
+
+    std::vector<ValueTypeCode> schema{ValueTypeCode::SI64};
+    std::vector<std::string> labels{"s"};
+    FileMetaData fmd(2, 1, false, schema, labels);
     std::map<std::string, std::string> opts;
     const char filename[] = "./test/runtime/local/io/ReadOrc_StringCol.orc";
-    REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&m), fmd, filename, opts, nullptr), std::runtime_error);
+
+    REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr), std::runtime_error);
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, type mismatch — file DOUBLE, meta STR", TAG_IO) {
+    // ReadOrc_DenseDouble.orc has DOUBLE columns; meta requests STR → throw.
+    ValueTypeCode schemaArr[] = {ValueTypeCode::STR, ValueTypeCode::STR, ValueTypeCode::STR, ValueTypeCode::STR};
+    std::string labelsArr[] = {"c0", "c1", "c2", "c3"};
+    Frame *f = DataObjectFactory::create<Frame>(2, 4, schemaArr, labelsArr, false);
+
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::STR, ValueTypeCode::STR, ValueTypeCode::STR};
+    std::vector<std::string> labels{"c0", "c1", "c2", "c3"};
+    FileMetaData fmd(2, 4, false, schema, labels);
+    std::map<std::string, std::string> opts;
+    const char filename[] = "./test/runtime/local/io/ReadOrc_DenseDouble.orc";
+
+    REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr), std::runtime_error);
+    DataObjectFactory::destroy(f);
 }
 
 TEST_CASE("ReadOrc, rejects nulls", TAG_IO) {
