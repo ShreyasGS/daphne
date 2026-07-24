@@ -28,11 +28,14 @@
 #include <orc/Type.hh>
 #include <orc/Vector.hh>
 
+#include <algorithm>
 #include <cstdint>
+#include <list>
 #include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 // ****************************************************************************
 // readOrc — reader for Apache ORC.
@@ -57,22 +60,90 @@ inline std::unique_ptr<orc::Reader> openOrcReader(const char *filename) {
     }
 }
 
-inline std::unique_ptr<orc::RowReader> openRowReader(orc::Reader &reader) {
+inline std::unique_ptr<orc::RowReader> openRowReader(orc::Reader &reader, const std::vector<std::string> &names) {
     orc::RowReaderOptions rowOpts;
+    if (!names.empty()) {
+        std::list<std::string> nameList(names.begin(), names.end());
+        rowOpts.include(nameList);
+    }
     return reader.createRowReader(rowOpts);
 }
 
-// Validate top-level shape (rows, cols, struct-rooted schema).
-inline void validateShape(const orc::Reader &reader, const FileMetaData &fmd) {
+// Validate top-level shape (rows, cols, struct-rooted schema). When
+// projection is active, the file's total column count is expected to be
+// >= fmd.numCols and is not checked here.
+inline void validateShape(const orc::Reader &reader, const FileMetaData &fmd, bool projected) {
     if (reader.getNumberOfRows() != fmd.numRows)
         throw std::runtime_error("ORC reader: row count mismatch — meta says " + std::to_string(fmd.numRows) +
                                  ", file has " + std::to_string(reader.getNumberOfRows()));
     const orc::Type &root = reader.getType();
     if (root.getKind() != orc::STRUCT)
         throw std::runtime_error("ORC reader: expected top-level struct in ORC file");
-    if (root.getSubtypeCount() != fmd.numCols)
+    if (!projected && root.getSubtypeCount() != fmd.numCols)
         throw std::runtime_error("ORC reader: column count mismatch — meta says " + std::to_string(fmd.numCols) +
                                  ", file has " + std::to_string(root.getSubtypeCount()));
+}
+
+// Split "a, b,c" into ["a", "b", "c"]. Trim ASCII whitespace around each
+// entry, throw on empty entries, throw on duplicates.
+inline std::vector<std::string> parseColumnList(const std::string &s) {
+    auto trim = [](std::string t) -> std::string {
+        const auto b = t.find_first_not_of(" \t");
+        if (b == std::string::npos)
+            return "";
+        const auto e = t.find_last_not_of(" \t");
+        return t.substr(b, e - b + 1);
+    };
+
+    if (trim(s).empty())
+        throw std::runtime_error("ORC reader: columns option must be a non-empty comma-separated list");
+
+    std::vector<std::string> result;
+    size_t start = 0;
+    while (true) {
+        const size_t comma = s.find(',', start);
+        const size_t end = (comma == std::string::npos) ? s.size() : comma;
+        std::string tok = trim(s.substr(start, end - start));
+        if (tok.empty())
+            throw std::runtime_error("ORC reader: columns option has an empty entry");
+        for (const auto &existing : result)
+            if (existing == tok)
+                throw std::runtime_error("ORC reader: columns option has duplicate entry '" + tok + "'");
+        result.push_back(std::move(tok));
+        if (comma == std::string::npos)
+            break;
+        start = comma + 1;
+    }
+    return result;
+}
+
+// Given the file's root struct type and a list of requested column names,
+// return the mapping from output index to file column index. Throws with
+// a human-readable list of available names if any requested name is
+// missing.
+inline std::vector<uint64_t> resolveProjection(const orc::Type &root, const std::vector<std::string> &names) {
+    std::vector<uint64_t> result;
+    result.reserve(names.size());
+    for (const auto &name : names) {
+        bool found = false;
+        for (uint64_t i = 0; i < root.getSubtypeCount(); ++i) {
+            if (root.getFieldName(i) == name) {
+                result.push_back(i);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std::string avail;
+            for (uint64_t i = 0; i < root.getSubtypeCount(); ++i) {
+                if (i > 0)
+                    avail += ", ";
+                avail += root.getFieldName(i);
+            }
+            throw std::runtime_error("ORC reader: column '" + name + "' not found in file (available: " + avail + ")");
+        }
+    }
+    return result;
 }
 
 // Throw if the column at index `c` does not have the expected ORC TypeKind.
@@ -97,14 +168,49 @@ inline void rejectNulls(const orc::ColumnVectorBatch *col, uint64_t cIdx) {
 
 inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
                     const std::map<std::string, std::string> &options, DaphneContext *ctx) {
-    (void)options; // reserved for future push-down hints
     (void)ctx;
 
-    auto reader = daphne_orc_detail::openOrcReader(filename);
-    daphne_orc_detail::validateShape(*reader, fmd);
-    const orc::Type &root = reader->getType();
+    // Parse `columns` option if present. Empty vector means no projection.
+    std::vector<std::string> projNames;
+    if (auto it = options.find("columns"); it != options.end())
+        projNames = daphne_orc_detail::parseColumnList(it->second);
+    const bool projected = !projNames.empty();
 
-    auto rowReader = daphne_orc_detail::openRowReader(*reader);
+    auto reader = daphne_orc_detail::openOrcReader(filename);
+    const orc::Type &root = reader->getType();
+    daphne_orc_detail::validateShape(*reader, fmd, projected);
+
+    // Resolve output-column -> file-column index mapping.
+    std::vector<uint64_t> fileColIdx;
+    if (projected) {
+        fileColIdx = daphne_orc_detail::resolveProjection(root, projNames);
+        if (fileColIdx.size() != fmd.numCols)
+            throw std::runtime_error("ORC reader: columns option requests " + std::to_string(fileColIdx.size()) +
+                                     " columns but meta says numCols=" + std::to_string(fmd.numCols));
+    } else {
+        fileColIdx.reserve(fmd.numCols);
+        for (uint64_t i = 0; i < fmd.numCols; ++i)
+            fileColIdx.push_back(i);
+    }
+
+    // liborc's include() compacts the batch's fields[] into file-schema
+    // order, not user-requested order. batchColIdx maps each output
+    // column c to its slot within the compacted batch.
+    std::vector<uint64_t> batchColIdx;
+    batchColIdx.reserve(fmd.numCols);
+    if (projected) {
+        std::vector<uint64_t> sorted = fileColIdx;
+        std::sort(sorted.begin(), sorted.end());
+        for (uint64_t c = 0; c < fmd.numCols; ++c) {
+            const auto it = std::find(sorted.begin(), sorted.end(), fileColIdx[c]);
+            batchColIdx.push_back(static_cast<uint64_t>(std::distance(sorted.begin(), it)));
+        }
+    } else {
+        for (uint64_t i = 0; i < fmd.numCols; ++i)
+            batchColIdx.push_back(i);
+    }
+
+    auto rowReader = daphne_orc_detail::openRowReader(*reader, projNames);
     constexpr uint64_t kBatchSize = 1024;
     auto batch = rowReader->createRowBatch(kBatchSize);
 
@@ -114,7 +220,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
         // ----- DenseMatrix<double> -----
         if (vt == ValueTypeCode::F64) {
             for (uint64_t c = 0; c < fmd.numCols; ++c)
-                daphne_orc_detail::expectColumnKind(root, c, orc::DOUBLE, "F64");
+                daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::DOUBLE, "F64");
 
             auto **out = reinterpret_cast<DenseMatrix<double> **>(res);
             DenseMatrix<double> *m = *out;
@@ -125,7 +231,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
                 if (!sb)
                     throw std::runtime_error("ORC reader: top-level batch is not a struct");
                 for (uint64_t c = 0; c < fmd.numCols; ++c) {
-                    auto *col = sb->fields[c];
+                    auto *col = sb->fields[batchColIdx[c]];
                     daphne_orc_detail::rejectNulls(col, c);
                     auto *dbl = dynamic_cast<orc::DoubleVectorBatch *>(col);
                     if (!dbl)
@@ -145,7 +251,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
         // ----- DenseMatrix<int64_t> -----
         if (vt == ValueTypeCode::SI64) {
             for (uint64_t c = 0; c < fmd.numCols; ++c)
-                daphne_orc_detail::expectColumnKind(root, c, orc::LONG, "SI64");
+                daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::LONG, "SI64");
 
             auto **out = reinterpret_cast<DenseMatrix<int64_t> **>(res);
             DenseMatrix<int64_t> *m = *out;
@@ -156,7 +262,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
                 if (!sb)
                     throw std::runtime_error("ORC reader: top-level batch is not a struct");
                 for (uint64_t c = 0; c < fmd.numCols; ++c) {
-                    auto *col = sb->fields[c];
+                    auto *col = sb->fields[batchColIdx[c]];
                     daphne_orc_detail::rejectNulls(col, c);
                     auto *lng = dynamic_cast<orc::LongVectorBatch *>(col);
                     if (!lng)
@@ -182,15 +288,15 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
         auto **outFrame = reinterpret_cast<Frame **>(res);
         Frame *f = *outFrame;
 
-        // Pre-validate each column's expected type against the ORC schema.
+        // Pre-validate each output column's expected type against the file's TypeKind.
         for (uint64_t c = 0; c < fmd.numCols; ++c) {
             const ValueTypeCode vtc = fmd.schema[c];
             if (vtc == ValueTypeCode::F64)
-                daphne_orc_detail::expectColumnKind(root, c, orc::DOUBLE, "F64");
+                daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::DOUBLE, "F64");
             else if (vtc == ValueTypeCode::SI64)
-                daphne_orc_detail::expectColumnKind(root, c, orc::LONG, "SI64");
+                daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::LONG, "SI64");
             else if (vtc == ValueTypeCode::STR)
-                daphne_orc_detail::expectColumnKind(root, c, orc::STRING, "STR");
+                daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::STRING, "STR");
             else
                 throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) — only F64, SI64, "
                                          "and STR are implemented (column " +
@@ -203,7 +309,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
             if (!sb)
                 throw std::runtime_error("ORC reader: top-level batch is not a struct");
             for (uint64_t c = 0; c < fmd.numCols; ++c) {
-                auto *col = sb->fields[c];
+                auto *col = sb->fields[batchColIdx[c]];
                 daphne_orc_detail::rejectNulls(col, c);
                 const ValueTypeCode vtc = fmd.schema[c];
                 if (vtc == ValueTypeCode::F64) {
