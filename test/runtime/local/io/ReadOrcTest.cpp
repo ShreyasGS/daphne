@@ -519,3 +519,272 @@ TEST_CASE("ReadOrc, projection empty entry", TAG_IO) {
     REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr), std::runtime_error);
     DataObjectFactory::destroy(f);
 }
+
+// ----------------------------------------------------------------------------
+// Predicate push-down
+// ----------------------------------------------------------------------------
+
+TEST_CASE("ReadOrc, predicate age > 40 on Frame", TAG_IO) {
+    // Fixture: name/age/dept/salary with rows alice/30, bob/41, carol/29.
+    // Predicate age > 40 matches only bob.
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age > 40"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr; // reader allocates
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f != nullptr);
+    REQUIRE(f->getNumRows() == 1);
+    REQUIRE(f->getNumCols() == 4);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "bob");
+    CHECK(f->getColumn<int64_t>(1)->get(0, 0) == 41);
+    CHECK(f->getColumn<std::string>(2)->get(0, 0) == "ops");
+    CHECK(f->getColumn<double>(3)->get(0, 0) == 95.0);
+
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate age = 30", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age = 30"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 1);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "alice");
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate age != 30", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age != 30"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 2);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "bob");
+    CHECK(f->getColumn<std::string>(0)->get(1, 0) == "carol");
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate age < 30", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age < 30"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 1);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "carol");
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate age <= 30", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age <= 30"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 2);
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate age >= 41", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age >= 41"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 1);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "bob");
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate salary > 80.0 (float literal)", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "salary > 80.0"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 2);
+    CHECK(f->getColumn<double>(3)->get(0, 0) == 80.5);
+    CHECK(f->getColumn<double>(3)->get(1, 0) == 95.0);
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate dept = 'eng' (string literal)", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "dept = 'eng'"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 2);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "alice");
+    CHECK(f->getColumn<std::string>(0)->get(1, 0) == "carol");
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate dept != 'eng'", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "dept != 'eng'"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 1);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "bob");
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate matches zero rows", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age > 100"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f != nullptr);
+    CHECK(f->getNumRows() == 0);
+    CHECK(f->getNumCols() == 4);
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate matches all rows", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age >= 0"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 3);
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate combined with column projection", TAG_IO) {
+    // Project [name, age], filter age > 40. Expect one row: bob, 41.
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64};
+    std::vector<std::string> labels{"name", "age"};
+    FileMetaData fmd(3, 2, false, schema, labels);
+    std::map<std::string, std::string> opts{{"columns", "name,age"}, {"predicate", "age > 40"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr);
+
+    REQUIRE(f->getNumRows() == 1);
+    REQUIRE(f->getNumCols() == 2);
+    CHECK(f->getColumn<std::string>(0)->get(0, 0) == "bob");
+    CHECK(f->getColumn<int64_t>(1)->get(0, 0) == 41);
+    DataObjectFactory::destroy(f);
+}
+
+TEST_CASE("ReadOrc, predicate references column not in projection", TAG_IO) {
+    // Project [name], filter on age (not projected) → throw.
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR};
+    std::vector<std::string> labels{"name"};
+    FileMetaData fmd(3, 1, false, schema, labels);
+    std::map<std::string, std::string> opts{{"columns", "name"}, {"predicate", "age > 40"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr), std::runtime_error);
+}
+
+TEST_CASE("ReadOrc, predicate literal type mismatch (int on STR col)", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR};
+    std::vector<std::string> labels{"name"};
+    FileMetaData fmd(3, 1, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "name > 5"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr), std::runtime_error);
+}
+
+TEST_CASE("ReadOrc, predicate bad syntax (missing literal)", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::SI64};
+    std::vector<std::string> labels{"age"};
+    FileMetaData fmd(3, 1, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age >"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr), std::runtime_error);
+}
+
+TEST_CASE("ReadOrc, predicate bad syntax (unknown operator)", TAG_IO) {
+    std::vector<ValueTypeCode> schema{ValueTypeCode::SI64};
+    std::vector<std::string> labels{"age"};
+    FileMetaData fmd(3, 1, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age ~ 40"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    Frame *f = nullptr;
+    REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr), std::runtime_error);
+}
+
+TEST_CASE("ReadOrc, predicate requires *res == nullptr", TAG_IO) {
+    ValueTypeCode schemaArr[] = {ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR, ValueTypeCode::F64};
+    std::string labelsArr[] = {"name", "age", "dept", "salary"};
+    Frame *f = DataObjectFactory::create<Frame>(3, 4, schemaArr, labelsArr, false);
+
+    std::vector<ValueTypeCode> schema{ValueTypeCode::STR, ValueTypeCode::SI64, ValueTypeCode::STR,
+                                      ValueTypeCode::F64};
+    std::vector<std::string> labels{"name", "age", "dept", "salary"};
+    FileMetaData fmd(3, 4, false, schema, labels);
+    std::map<std::string, std::string> opts{{"predicate", "age > 40"}};
+    const char filename[] = "./test/runtime/local/io/ReadOrc_StringFrame.orc";
+
+    REQUIRE_THROWS_AS(readOrc(reinterpret_cast<void *>(&f), fmd, filename, opts, nullptr), std::runtime_error);
+    DataObjectFactory::destroy(f);
+}

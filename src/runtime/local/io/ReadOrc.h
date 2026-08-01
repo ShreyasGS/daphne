@@ -27,9 +27,12 @@
 #include <orc/Reader.hh>
 #include <orc/Type.hh>
 #include <orc/Vector.hh>
+#include <orc/sargs/SearchArgument.hh>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <list>
 #include <map>
 #include <memory>
@@ -58,6 +61,237 @@ inline std::unique_ptr<orc::Reader> openOrcReader(const char *filename) {
     } catch (const std::exception &e) {
         throw std::runtime_error(std::string("ORC reader: failed to open file '") + filename + "' (" + e.what() + ")");
     }
+}
+
+// Parsed representation of a single-clause predicate:
+//   <col> <op> <literal>
+// Only one clause is supported. Compound predicates (AND/OR/NOT) are out of
+// scope for this initial implementation.
+struct ParsedPredicate {
+    enum class Op { EQ, NEQ, LT, LTE, GT, GTE };
+    enum class LiteralKind { INT, FLOAT, STRING };
+
+    std::string column;
+    Op op;
+    LiteralKind kind;
+    int64_t intVal = 0;
+    double floatVal = 0.0;
+    std::string stringVal;
+};
+
+inline std::string trimAscii(const std::string &t) {
+    const auto b = t.find_first_not_of(" \t");
+    if (b == std::string::npos)
+        return "";
+    const auto e = t.find_last_not_of(" \t");
+    return t.substr(b, e - b + 1);
+}
+
+// Parse a predicate string like `age > 60`, `dept = 'eng'`, `salary <= 72.25`.
+// Throws with the offending fragment quoted on any failure.
+inline ParsedPredicate parsePredicate(const std::string &s) {
+    const std::string trimmed = trimAscii(s);
+    if (trimmed.empty())
+        throw std::runtime_error("ORC reader: predicate option is empty");
+
+    size_t i = 0;
+    if (!(std::isalpha(static_cast<unsigned char>(trimmed[i])) || trimmed[i] == '_'))
+        throw std::runtime_error("ORC reader: predicate must start with a column name, got '" + trimmed + "'");
+    const size_t colStart = i;
+    while (i < trimmed.size() &&
+           (std::isalnum(static_cast<unsigned char>(trimmed[i])) || trimmed[i] == '_'))
+        ++i;
+    ParsedPredicate p;
+    p.column = trimmed.substr(colStart, i - colStart);
+
+    while (i < trimmed.size() && (trimmed[i] == ' ' || trimmed[i] == '\t'))
+        ++i;
+    if (i >= trimmed.size())
+        throw std::runtime_error("ORC reader: predicate is missing an operator after column '" + p.column + "'");
+
+    auto matchOp = [&](const char *lit, ParsedPredicate::Op v) -> bool {
+        const size_t n = std::strlen(lit);
+        if (trimmed.compare(i, n, lit) == 0) {
+            p.op = v;
+            i += n;
+            return true;
+        }
+        return false;
+    };
+    if (!matchOp(">=", ParsedPredicate::Op::GTE) && !matchOp("<=", ParsedPredicate::Op::LTE) &&
+        !matchOp("!=", ParsedPredicate::Op::NEQ) && !matchOp("=", ParsedPredicate::Op::EQ) &&
+        !matchOp(">", ParsedPredicate::Op::GT) && !matchOp("<", ParsedPredicate::Op::LT))
+        throw std::runtime_error("ORC reader: predicate has an unknown operator near '" + trimmed.substr(i) + "'");
+
+    while (i < trimmed.size() && (trimmed[i] == ' ' || trimmed[i] == '\t'))
+        ++i;
+    if (i >= trimmed.size())
+        throw std::runtime_error("ORC reader: predicate is missing a literal after the operator");
+
+    if (trimmed[i] == '\'') {
+        const size_t litStart = i + 1;
+        const size_t litEnd = trimmed.find('\'', litStart);
+        if (litEnd == std::string::npos)
+            throw std::runtime_error("ORC reader: predicate string literal missing closing quote near '" +
+                                     trimmed.substr(i) + "'");
+        p.kind = ParsedPredicate::LiteralKind::STRING;
+        p.stringVal = trimmed.substr(litStart, litEnd - litStart);
+        i = litEnd + 1;
+    } else {
+        const std::string litStr = trimAscii(trimmed.substr(i));
+        i = trimmed.size();
+        if (litStr.empty())
+            throw std::runtime_error("ORC reader: predicate literal is missing");
+        if (litStr.find('.') != std::string::npos) {
+            try {
+                p.kind = ParsedPredicate::LiteralKind::FLOAT;
+                p.floatVal = std::stod(litStr);
+            } catch (const std::exception &) {
+                throw std::runtime_error("ORC reader: predicate has an invalid float literal '" + litStr + "'");
+            }
+        } else {
+            try {
+                p.kind = ParsedPredicate::LiteralKind::INT;
+                p.intVal = std::stoll(litStr);
+            } catch (const std::exception &) {
+                throw std::runtime_error("ORC reader: predicate has an invalid integer literal '" + litStr + "'");
+            }
+        }
+    }
+
+    while (i < trimmed.size() && (trimmed[i] == ' ' || trimmed[i] == '\t'))
+        ++i;
+    if (i != trimmed.size())
+        throw std::runtime_error("ORC reader: predicate has unexpected trailing text near '" +
+                                 trimmed.substr(i) + "'");
+
+    return p;
+}
+
+// Verify the predicate's column is present in the output and the literal
+// kind matches the column type. Returns the OUTPUT-side column index.
+inline uint64_t resolveAndValidatePredicate(const ParsedPredicate &p, const FileMetaData &fmd) {
+    for (uint64_t c = 0; c < fmd.numCols; ++c) {
+        const std::string &label = (c < fmd.labels.size()) ? fmd.labels[c] : std::string();
+        if (label != p.column)
+            continue;
+        const ValueTypeCode vtc = fmd.schema[c];
+        const bool okInt = (vtc == ValueTypeCode::SI64 && p.kind == ParsedPredicate::LiteralKind::INT);
+        const bool okFloat = (vtc == ValueTypeCode::F64 && p.kind == ParsedPredicate::LiteralKind::FLOAT);
+        const bool okStr = (vtc == ValueTypeCode::STR && p.kind == ParsedPredicate::LiteralKind::STRING);
+        if (!(okInt || okFloat || okStr))
+            throw std::runtime_error("ORC reader: predicate literal type does not match column '" + p.column + "'");
+        return c;
+    }
+    throw std::runtime_error("ORC reader: predicate column '" + p.column + "' is not in the output schema");
+}
+
+// Build a liborc SearchArgument from a parsed predicate.
+inline std::unique_ptr<orc::SearchArgument> buildSearchArgument(const ParsedPredicate &p) {
+    auto builder = orc::SearchArgumentFactory::newBuilder();
+    orc::PredicateDataType pdt = orc::PredicateDataType::LONG;
+    orc::Literal lit(int64_t{0});
+    switch (p.kind) {
+    case ParsedPredicate::LiteralKind::INT:
+        pdt = orc::PredicateDataType::LONG;
+        lit = orc::Literal(p.intVal);
+        break;
+    case ParsedPredicate::LiteralKind::FLOAT:
+        pdt = orc::PredicateDataType::FLOAT;
+        lit = orc::Literal(p.floatVal);
+        break;
+    case ParsedPredicate::LiteralKind::STRING:
+        pdt = orc::PredicateDataType::STRING;
+        lit = orc::Literal(p.stringVal.c_str(), p.stringVal.size());
+        break;
+    }
+
+    builder->startAnd();
+    switch (p.op) {
+    case ParsedPredicate::Op::EQ:
+        builder->equals(p.column, pdt, lit);
+        break;
+    case ParsedPredicate::Op::NEQ:
+        builder->startNot().equals(p.column, pdt, lit).end();
+        break;
+    case ParsedPredicate::Op::LT:
+        builder->lessThan(p.column, pdt, lit);
+        break;
+    case ParsedPredicate::Op::LTE:
+        builder->lessThanEquals(p.column, pdt, lit);
+        break;
+    case ParsedPredicate::Op::GT:
+        builder->startNot().lessThanEquals(p.column, pdt, lit).end();
+        break;
+    case ParsedPredicate::Op::GTE:
+        builder->startNot().lessThan(p.column, pdt, lit).end();
+        break;
+    }
+    builder->end();
+    return builder->build();
+}
+
+// Per-row correctness filter. `col` is the decoded batch column for the
+// predicate's column; `rowIdx` is the row within the batch.
+inline bool matchesRow(const ParsedPredicate &p, const orc::ColumnVectorBatch *col, uint64_t rowIdx) {
+    switch (p.kind) {
+    case ParsedPredicate::LiteralKind::INT: {
+        const auto *lng = dynamic_cast<const orc::LongVectorBatch *>(col);
+        if (!lng)
+            throw std::runtime_error("ORC reader: predicate on '" + p.column +
+                                     "' — decoded batch is not a LongVectorBatch");
+        const int64_t v = lng->data[rowIdx];
+        switch (p.op) {
+        case ParsedPredicate::Op::EQ:  return v == p.intVal;
+        case ParsedPredicate::Op::NEQ: return v != p.intVal;
+        case ParsedPredicate::Op::LT:  return v <  p.intVal;
+        case ParsedPredicate::Op::LTE: return v <= p.intVal;
+        case ParsedPredicate::Op::GT:  return v >  p.intVal;
+        case ParsedPredicate::Op::GTE: return v >= p.intVal;
+        }
+    } break;
+    case ParsedPredicate::LiteralKind::FLOAT: {
+        const auto *dbl = dynamic_cast<const orc::DoubleVectorBatch *>(col);
+        if (!dbl)
+            throw std::runtime_error("ORC reader: predicate on '" + p.column +
+                                     "' — decoded batch is not a DoubleVectorBatch");
+        const double v = dbl->data[rowIdx];
+        switch (p.op) {
+        case ParsedPredicate::Op::EQ:  return v == p.floatVal;
+        case ParsedPredicate::Op::NEQ: return v != p.floatVal;
+        case ParsedPredicate::Op::LT:  return v <  p.floatVal;
+        case ParsedPredicate::Op::LTE: return v <= p.floatVal;
+        case ParsedPredicate::Op::GT:  return v >  p.floatVal;
+        case ParsedPredicate::Op::GTE: return v >= p.floatVal;
+        }
+    } break;
+    case ParsedPredicate::LiteralKind::STRING: {
+        const auto *sc = dynamic_cast<const orc::StringVectorBatch *>(col);
+        if (!sc)
+            throw std::runtime_error("ORC reader: predicate on '" + p.column +
+                                     "' — decoded batch is not a StringVectorBatch");
+        const size_t vlen = static_cast<size_t>(sc->length[rowIdx]);
+        const char *vptr = sc->data[rowIdx];
+        int cmp;
+        if (vlen == p.stringVal.size() && std::memcmp(vptr, p.stringVal.data(), vlen) == 0) {
+            cmp = 0;
+        } else {
+            const size_t minLen = std::min(vlen, p.stringVal.size());
+            cmp = std::memcmp(vptr, p.stringVal.data(), minLen);
+            if (cmp == 0)
+                cmp = (vlen < p.stringVal.size()) ? -1 : 1;
+        }
+        switch (p.op) {
+        case ParsedPredicate::Op::EQ:  return cmp == 0;
+        case ParsedPredicate::Op::NEQ: return cmp != 0;
+        case ParsedPredicate::Op::LT:  return cmp <  0;
+        case ParsedPredicate::Op::LTE: return cmp <= 0;
+        case ParsedPredicate::Op::GT:  return cmp >  0;
+        case ParsedPredicate::Op::GTE: return cmp >= 0;
+        }
+    } break;
+    }
+    throw std::runtime_error("ORC reader: unreachable in matchesRow");
 }
 
 inline std::unique_ptr<orc::RowReader> openRowReader(orc::Reader &reader, const std::vector<std::string> &names) {
@@ -176,6 +410,16 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
         projNames = daphne_orc_detail::parseColumnList(it->second);
     const bool projected = !projNames.empty();
 
+    // Parse `predicate` option if present.
+    daphne_orc_detail::ParsedPredicate parsedPred;
+    bool hasPredicate = false;
+    uint64_t predOutColIdx = 0;
+    if (auto it = options.find("predicate"); it != options.end()) {
+        parsedPred = daphne_orc_detail::parsePredicate(it->second);
+        predOutColIdx = daphne_orc_detail::resolveAndValidatePredicate(parsedPred, fmd);
+        hasPredicate = true;
+    }
+
     auto reader = daphne_orc_detail::openOrcReader(filename);
     const orc::Type &root = reader->getType();
     daphne_orc_detail::validateShape(*reader, fmd, projected);
@@ -210,9 +454,166 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
             batchColIdx.push_back(i);
     }
 
-    auto rowReader = daphne_orc_detail::openRowReader(*reader, projNames);
+    orc::RowReaderOptions rowOpts;
+    if (!projNames.empty()) {
+        std::list<std::string> nameList(projNames.begin(), projNames.end());
+        rowOpts.include(nameList);
+    }
+    if (hasPredicate)
+        rowOpts.searchArgument(daphne_orc_detail::buildSearchArgument(parsedPred));
+    auto rowReader = reader->createRowReader(rowOpts);
     constexpr uint64_t kBatchSize = 1024;
     auto batch = rowReader->createRowBatch(kBatchSize);
+
+    // ----- Predicate branch (Option C: reader allocates final result) -----
+    if (hasPredicate) {
+        if (fmd.isSingleValueType) {
+            const ValueTypeCode vt = fmd.schema.empty() ? ValueTypeCode::F64 : fmd.schema[0];
+            if (vt != ValueTypeCode::F64 && vt != ValueTypeCode::SI64)
+                throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) — "
+                                         "only F64 and SI64 are implemented");
+            for (uint64_t c = 0; c < fmd.numCols; ++c)
+                daphne_orc_detail::expectColumnKind(
+                    root, fileColIdx[c],
+                    (vt == ValueTypeCode::F64) ? orc::DOUBLE : orc::LONG,
+                    (vt == ValueTypeCode::F64) ? "F64" : "SI64");
+
+            if (vt == ValueTypeCode::F64) {
+                auto **out = reinterpret_cast<DenseMatrix<double> **>(res);
+                if (*out != nullptr)
+                    throw std::runtime_error("ORC reader: predicate requires *res == nullptr; caller pre-allocated");
+                std::vector<double> vals;
+                vals.reserve(static_cast<size_t>(fmd.numRows) * fmd.numCols);
+                uint64_t matched = 0;
+                while (rowReader->next(*batch)) {
+                    auto *sb = dynamic_cast<orc::StructVectorBatch *>(batch.get());
+                    if (!sb)
+                        throw std::runtime_error("ORC reader: top-level batch is not a struct");
+                    for (uint64_t c = 0; c < fmd.numCols; ++c)
+                        daphne_orc_detail::rejectNulls(sb->fields[batchColIdx[c]], c);
+                    for (uint64_t i = 0; i < batch->numElements; ++i) {
+                        if (!daphne_orc_detail::matchesRow(parsedPred, sb->fields[batchColIdx[predOutColIdx]], i))
+                            continue;
+                        for (uint64_t c = 0; c < fmd.numCols; ++c) {
+                            const auto *dbl =
+                                dynamic_cast<orc::DoubleVectorBatch *>(sb->fields[batchColIdx[c]]);
+                            vals.push_back(dbl->data[i]);
+                        }
+                        ++matched;
+                    }
+                }
+                *out = DataObjectFactory::create<DenseMatrix<double>>(matched, fmd.numCols, false);
+                std::copy(vals.begin(), vals.end(), (*out)->getValues());
+            } else { // SI64
+                auto **out = reinterpret_cast<DenseMatrix<int64_t> **>(res);
+                if (*out != nullptr)
+                    throw std::runtime_error("ORC reader: predicate requires *res == nullptr; caller pre-allocated");
+                std::vector<int64_t> vals;
+                vals.reserve(static_cast<size_t>(fmd.numRows) * fmd.numCols);
+                uint64_t matched = 0;
+                while (rowReader->next(*batch)) {
+                    auto *sb = dynamic_cast<orc::StructVectorBatch *>(batch.get());
+                    if (!sb)
+                        throw std::runtime_error("ORC reader: top-level batch is not a struct");
+                    for (uint64_t c = 0; c < fmd.numCols; ++c)
+                        daphne_orc_detail::rejectNulls(sb->fields[batchColIdx[c]], c);
+                    for (uint64_t i = 0; i < batch->numElements; ++i) {
+                        if (!daphne_orc_detail::matchesRow(parsedPred, sb->fields[batchColIdx[predOutColIdx]], i))
+                            continue;
+                        for (uint64_t c = 0; c < fmd.numCols; ++c) {
+                            const auto *lng =
+                                dynamic_cast<orc::LongVectorBatch *>(sb->fields[batchColIdx[c]]);
+                            vals.push_back(lng->data[i]);
+                        }
+                        ++matched;
+                    }
+                }
+                *out = DataObjectFactory::create<DenseMatrix<int64_t>>(matched, fmd.numCols, false);
+                std::copy(vals.begin(), vals.end(), (*out)->getValues());
+            }
+            return;
+        }
+
+        // Frame path with predicate: one growth buffer per column, typed by schema.
+        auto **outFrame = reinterpret_cast<Frame **>(res);
+        if (*outFrame != nullptr)
+            throw std::runtime_error("ORC reader: predicate requires *res == nullptr; caller pre-allocated");
+
+        for (uint64_t c = 0; c < fmd.numCols; ++c) {
+            const ValueTypeCode vtc = fmd.schema[c];
+            if (vtc == ValueTypeCode::F64)
+                daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::DOUBLE, "F64");
+            else if (vtc == ValueTypeCode::SI64)
+                daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::LONG, "SI64");
+            else if (vtc == ValueTypeCode::STR)
+                daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::STRING, "STR");
+            else
+                throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) — "
+                                         "only F64, SI64, and STR are implemented (column " +
+                                         std::to_string(c) + ")");
+        }
+
+        std::vector<std::vector<double>> f64_bufs(fmd.numCols);
+        std::vector<std::vector<int64_t>> si64_bufs(fmd.numCols);
+        std::vector<std::vector<std::string>> str_bufs(fmd.numCols);
+        for (uint64_t c = 0; c < fmd.numCols; ++c) {
+            if (fmd.schema[c] == ValueTypeCode::F64)
+                f64_bufs[c].reserve(fmd.numRows);
+            else if (fmd.schema[c] == ValueTypeCode::SI64)
+                si64_bufs[c].reserve(fmd.numRows);
+            else
+                str_bufs[c].reserve(fmd.numRows);
+        }
+
+        uint64_t matched = 0;
+        while (rowReader->next(*batch)) {
+            auto *sb = dynamic_cast<orc::StructVectorBatch *>(batch.get());
+            if (!sb)
+                throw std::runtime_error("ORC reader: top-level batch is not a struct");
+            for (uint64_t c = 0; c < fmd.numCols; ++c)
+                daphne_orc_detail::rejectNulls(sb->fields[batchColIdx[c]], c);
+            for (uint64_t i = 0; i < batch->numElements; ++i) {
+                if (!daphne_orc_detail::matchesRow(parsedPred, sb->fields[batchColIdx[predOutColIdx]], i))
+                    continue;
+                for (uint64_t c = 0; c < fmd.numCols; ++c) {
+                    auto *col = sb->fields[batchColIdx[c]];
+                    const ValueTypeCode vtc = fmd.schema[c];
+                    if (vtc == ValueTypeCode::F64) {
+                        auto *dbl = dynamic_cast<orc::DoubleVectorBatch *>(col);
+                        f64_bufs[c].push_back(dbl->data[i]);
+                    } else if (vtc == ValueTypeCode::SI64) {
+                        auto *lng = dynamic_cast<orc::LongVectorBatch *>(col);
+                        si64_bufs[c].push_back(lng->data[i]);
+                    } else { // STR
+                        auto *sc = dynamic_cast<orc::StringVectorBatch *>(col);
+                        str_bufs[c].push_back(sc->length[i] > 0
+                                                  ? std::string(sc->data[i], static_cast<size_t>(sc->length[i]))
+                                                  : std::string());
+                    }
+                }
+                ++matched;
+            }
+        }
+
+        std::vector<ValueTypeCode> outSchema(fmd.schema.begin(), fmd.schema.end());
+        std::vector<std::string> outLabels(fmd.labels.begin(), fmd.labels.end());
+        *outFrame = DataObjectFactory::create<Frame>(matched, fmd.numCols, outSchema.data(),
+                                                    outLabels.empty() ? nullptr : outLabels.data(), false);
+        for (uint64_t c = 0; c < fmd.numCols; ++c) {
+            const ValueTypeCode vtc = fmd.schema[c];
+            if (vtc == ValueTypeCode::F64) {
+                double *dst = (*outFrame)->getColumn<double>(c)->getValues();
+                std::copy(f64_bufs[c].begin(), f64_bufs[c].end(), dst);
+            } else if (vtc == ValueTypeCode::SI64) {
+                int64_t *dst = (*outFrame)->getColumn<int64_t>(c)->getValues();
+                std::copy(si64_bufs[c].begin(), si64_bufs[c].end(), dst);
+            } else {
+                std::string *dst = (*outFrame)->getColumn<std::string>(c)->getValues();
+                std::copy(str_bufs[c].begin(), str_bufs[c].end(), dst);
+            }
+        }
+        return;
+    }
 
     if (fmd.isSingleValueType) {
         const ValueTypeCode vt = fmd.schema.empty() ? ValueTypeCode::F64 : fmd.schema[0];
