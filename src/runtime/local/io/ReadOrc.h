@@ -41,7 +41,7 @@
 #include <vector>
 
 // ****************************************************************************
-// readOrc — reader for Apache ORC.
+// readOrc - reader for Apache ORC.
 //
 // Signature matches the reader/writer extensibility interface introduced in
 // PR #993 (daphne-eu/daphne). Until PR #993 is merged, this function is
@@ -239,7 +239,7 @@ inline bool matchesRow(const ParsedPredicate &p, const orc::ColumnVectorBatch *c
         const auto *lng = dynamic_cast<const orc::LongVectorBatch *>(col);
         if (!lng)
             throw std::runtime_error("ORC reader: predicate on '" + p.column +
-                                     "' — decoded batch is not a LongVectorBatch");
+                                     "' - decoded batch is not a LongVectorBatch");
         const int64_t v = lng->data[rowIdx];
         switch (p.op) {
         case ParsedPredicate::Op::EQ:  return v == p.intVal;
@@ -254,7 +254,7 @@ inline bool matchesRow(const ParsedPredicate &p, const orc::ColumnVectorBatch *c
         const auto *dbl = dynamic_cast<const orc::DoubleVectorBatch *>(col);
         if (!dbl)
             throw std::runtime_error("ORC reader: predicate on '" + p.column +
-                                     "' — decoded batch is not a DoubleVectorBatch");
+                                     "' - decoded batch is not a DoubleVectorBatch");
         const double v = dbl->data[rowIdx];
         switch (p.op) {
         case ParsedPredicate::Op::EQ:  return v == p.floatVal;
@@ -269,7 +269,7 @@ inline bool matchesRow(const ParsedPredicate &p, const orc::ColumnVectorBatch *c
         const auto *sc = dynamic_cast<const orc::StringVectorBatch *>(col);
         if (!sc)
             throw std::runtime_error("ORC reader: predicate on '" + p.column +
-                                     "' — decoded batch is not a StringVectorBatch");
+                                     "' - decoded batch is not a StringVectorBatch");
         const size_t vlen = static_cast<size_t>(sc->length[rowIdx]);
         const char *vptr = sc->data[rowIdx];
         int cmp;
@@ -308,13 +308,13 @@ inline std::unique_ptr<orc::RowReader> openRowReader(orc::Reader &reader, const 
 // >= fmd.numCols and is not checked here.
 inline void validateShape(const orc::Reader &reader, const FileMetaData &fmd, bool projected) {
     if (reader.getNumberOfRows() != fmd.numRows)
-        throw std::runtime_error("ORC reader: row count mismatch — meta says " + std::to_string(fmd.numRows) +
+        throw std::runtime_error("ORC reader: row count mismatch - meta says " + std::to_string(fmd.numRows) +
                                  ", file has " + std::to_string(reader.getNumberOfRows()));
     const orc::Type &root = reader.getType();
     if (root.getKind() != orc::STRUCT)
         throw std::runtime_error("ORC reader: expected top-level struct in ORC file");
     if (!projected && root.getSubtypeCount() != fmd.numCols)
-        throw std::runtime_error("ORC reader: column count mismatch — meta says " + std::to_string(fmd.numCols) +
+        throw std::runtime_error("ORC reader: column count mismatch - meta says " + std::to_string(fmd.numCols) +
                                  ", file has " + std::to_string(root.getSubtypeCount()));
 }
 
@@ -384,20 +384,20 @@ inline std::vector<uint64_t> resolveProjection(const orc::Type &root, const std:
 inline void expectColumnKind(const orc::Type &root, uint64_t c, orc::TypeKind expected, const char *expectedLabel) {
     orc::TypeKind got = root.getSubtype(c)->getKind();
     if (got != expected)
-        throw std::runtime_error(std::string("ORC reader: column ") + std::to_string(c) + " type mismatch — expected " +
+        throw std::runtime_error(std::string("ORC reader: column ") + std::to_string(c) + " type mismatch - expected " +
                                  expectedLabel + ", got " + root.getSubtype(c)->toString());
 }
 
 // Reject a batch column that contains null entries.
 inline void rejectNulls(const orc::ColumnVectorBatch *col, uint64_t cIdx) {
     if (col->hasNulls)
-        throw std::runtime_error("ORC reader: null values not supported (yet) — column " + std::to_string(cIdx));
+        throw std::runtime_error("ORC reader: null values not supported (yet) - column " + std::to_string(cIdx));
 }
 
 } // namespace daphne_orc_detail
 
 // ----------------------------------------------------------------------------
-// readOrc — entry point matching PR #993 reader signature.
+// readOrc - entry point matching PR #993 reader signature.
 // ----------------------------------------------------------------------------
 
 inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
@@ -470,7 +470,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
         if (fmd.isSingleValueType) {
             const ValueTypeCode vt = fmd.schema.empty() ? ValueTypeCode::F64 : fmd.schema[0];
             if (vt != ValueTypeCode::F64 && vt != ValueTypeCode::SI64)
-                throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) — "
+                throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) - "
                                          "only F64 and SI64 are implemented");
             for (uint64_t c = 0; c < fmd.numCols; ++c)
                 daphne_orc_detail::expectColumnKind(
@@ -548,7 +548,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
             else if (vtc == ValueTypeCode::STR)
                 daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::STRING, "STR");
             else
-                throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) — "
+                throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) - "
                                          "only F64, SI64, and STR are implemented (column " +
                                          std::to_string(c) + ")");
         }
@@ -637,7 +637,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
                     auto *dbl = dynamic_cast<orc::DoubleVectorBatch *>(col);
                     if (!dbl)
                         throw std::runtime_error("ORC reader: column " + std::to_string(c) +
-                                                 " type mismatch — expected F64 (DoubleVectorBatch)");
+                                                 " type mismatch - expected F64 (DoubleVectorBatch)");
                     for (uint64_t i = 0; i < batch->numElements; ++i)
                         vals[(rowOffset + i) * fmd.numCols + c] = dbl->data[i];
                 }
@@ -668,7 +668,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
                     auto *lng = dynamic_cast<orc::LongVectorBatch *>(col);
                     if (!lng)
                         throw std::runtime_error("ORC reader: column " + std::to_string(c) +
-                                                 " type mismatch — expected SI64 (LongVectorBatch)");
+                                                 " type mismatch - expected SI64 (LongVectorBatch)");
                     for (uint64_t i = 0; i < batch->numElements; ++i)
                         vals[(rowOffset + i) * fmd.numCols + c] = lng->data[i];
                 }
@@ -680,7 +680,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
             return;
         }
 
-        throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) — only F64 and SI64 are "
+        throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) - only F64 and SI64 are "
                                  "implemented");
     }
 
@@ -699,7 +699,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
             else if (vtc == ValueTypeCode::STR)
                 daphne_orc_detail::expectColumnKind(root, fileColIdx[c], orc::STRING, "STR");
             else
-                throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) — only F64, SI64, "
+                throw std::runtime_error("ORC reader: value type not supported by ORC reader (yet) - only F64, SI64, "
                                          "and STR are implemented (column " +
                                          std::to_string(c) + ")");
         }
@@ -717,7 +717,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
                     auto *dbl = dynamic_cast<orc::DoubleVectorBatch *>(col);
                     if (!dbl)
                         throw std::runtime_error("ORC reader: column " + std::to_string(c) +
-                                                 " type mismatch — expected F64");
+                                                 " type mismatch - expected F64");
                     double *buf = f->getColumn<double>(c)->getValues();
                     for (uint64_t i = 0; i < batch->numElements; ++i)
                         buf[rowOffset + i] = dbl->data[i];
@@ -725,7 +725,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
                     auto *lng = dynamic_cast<orc::LongVectorBatch *>(col);
                     if (!lng)
                         throw std::runtime_error("ORC reader: column " + std::to_string(c) +
-                                                 " type mismatch — expected SI64");
+                                                 " type mismatch - expected SI64");
                     int64_t *buf = f->getColumn<int64_t>(c)->getValues();
                     for (uint64_t i = 0; i < batch->numElements; ++i)
                         buf[rowOffset + i] = lng->data[i];
@@ -733,7 +733,7 @@ inline void readOrc(void *res, const FileMetaData &fmd, const char *filename,
                     auto *sc = dynamic_cast<orc::StringVectorBatch *>(col);
                     if (!sc)
                         throw std::runtime_error("ORC reader: column " + std::to_string(c) +
-                                                 " type mismatch — expected STR (StringVectorBatch)");
+                                                 " type mismatch - expected STR (StringVectorBatch)");
                     std::string *buf = f->getColumn<std::string>(c)->getValues();
                     for (uint64_t i = 0; i < batch->numElements; ++i)
                         buf[rowOffset + i] = (sc->length[i] > 0)

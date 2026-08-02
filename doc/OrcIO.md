@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Reading Apache ORC files
+# Reading Apache ORC Files
 
 DAPHNE reads Apache ORC files into `DenseMatrix` or `Frame` values.
 The reader uses the Apache ORC C++ library directly and supports
@@ -62,7 +62,7 @@ make -j$(nproc) install
 Once `.deps/orc/lib/liborc.a` exists, `./build.sh` finds it and
 links it automatically. No extra `build.sh` flag is required.
 
-## Supported target types and value types
+## Supported Target Types and Value Types
 
 | Target | Value types |
 |---|---|
@@ -76,7 +76,7 @@ message. Null values are rejected across all types.
 `DenseMatrix<std::string>` is not supported (matches the posture
 of the CSV and Parquet readers).
 
-## The `.meta` sidecar for ORC files
+## The `.meta` Sidecar for ORC Files
 
 Like every other reader in DAPHNE, ORC requires a matching
 `filename.orc.meta` sidecar describing the target shape. See
@@ -108,7 +108,7 @@ Example sidecar for a homogeneous `DenseMatrix<double>`:
 }
 ```
 
-## Whole-file read
+## Whole-File Read
 
 The simplest case reads every row and every column into the target
 type declared by the sidecar:
@@ -120,7 +120,7 @@ print(X);
 
 Available today. No changes needed after #993 merges.
 
-## Column projection
+## Column Projection
 
 Pass `options["columns"]` to read only a subset of the file's
 columns. Columns are named by their ORC file column labels, are
@@ -145,7 +145,7 @@ Rules:
   projecting one string column into a `DenseMatrix<double>` fails
   with a type-mismatch error.
 
-## Predicate push-down
+## Predicate Push-Down
 
 Pass `options["predicate"]` to filter rows during the read. Rows
 that do not satisfy the predicate never appear in the output.
@@ -186,7 +186,7 @@ completes, when a predicate is set the reader allocates the final
 that construct the reader directly from C++ must therefore pass
 `*res = nullptr` when supplying a predicate.
 
-## Error cases
+## Error Cases
 
 The reader throws `std::runtime_error` with a message prefixed
 `"ORC reader: "` for:
@@ -205,7 +205,7 @@ The reader throws `std::runtime_error` with a message prefixed
   that does not match the column's DAPHNE value type, or a
   predicate column that is not in the output.
 
-## Future work
+## Future Work
 
 - DaphneDSL surface for options once PR #993 lands.
 - Compound predicates (`AND` / `OR`, `IS NULL`).

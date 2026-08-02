@@ -249,7 +249,7 @@ TEST_CASE("ReadOrc, column count mismatch", TAG_IO) {
     DataObjectFactory::destroy(m);
 }
 
-TEST_CASE("ReadOrc, type mismatch — file STRING, meta SI64", TAG_IO) {
+TEST_CASE("ReadOrc, type mismatch - file STRING, meta SI64", TAG_IO) {
     // ReadOrc_StringCol.orc has one STRING column; meta requests SI64 → throw.
     ValueTypeCode schemaArr[] = {ValueTypeCode::SI64};
     std::string labelsArr[] = {"s"};
@@ -265,7 +265,7 @@ TEST_CASE("ReadOrc, type mismatch — file STRING, meta SI64", TAG_IO) {
     DataObjectFactory::destroy(f);
 }
 
-TEST_CASE("ReadOrc, type mismatch — file DOUBLE, meta STR", TAG_IO) {
+TEST_CASE("ReadOrc, type mismatch - file DOUBLE, meta STR", TAG_IO) {
     // ReadOrc_DenseDouble.orc has DOUBLE columns; meta requests STR → throw.
     ValueTypeCode schemaArr[] = {ValueTypeCode::STR, ValueTypeCode::STR, ValueTypeCode::STR, ValueTypeCode::STR};
     std::string labelsArr[] = {"c0", "c1", "c2", "c3"};
@@ -359,7 +359,7 @@ TEST_CASE("ReadOrc, project single column", TAG_IO) {
 }
 
 TEST_CASE("ReadOrc, project with reordering", TAG_IO) {
-    // Request salary,name — output order matches request order.
+    // Request salary,name - output order matches request order.
     ValueTypeCode schemaArr[] = {ValueTypeCode::F64, ValueTypeCode::STR};
     std::string labelsArr[] = {"salary", "name"};
     Frame *f = DataObjectFactory::create<Frame>(3, 2, schemaArr, labelsArr, false);
