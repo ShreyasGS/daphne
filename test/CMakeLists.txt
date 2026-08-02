@@ -83,6 +83,7 @@ set(TEST_SOURCES
 
         runtime/local/io/ReadCsvTest.cpp
         runtime/local/io/ReadOrcTest.cpp
+        runtime/local/io/BenchOrcPredicate.cpp
         runtime/local/io/ReadParquetTest.cpp
         runtime/local/io/ReadMMTest.cpp
         runtime/local/io/WriteDaphneTest.cpp
