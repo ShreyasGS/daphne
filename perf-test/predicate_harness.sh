@@ -19,14 +19,14 @@
 set -euo pipefail
 
 CASES=(
-    "bench, 1M sorted, baseline|1M_sorted|baseline"
-    "bench, 1M sorted, predicate|1M_sorted|predicate"
-    "bench, 1M shuffled, baseline|1M_shuffled|baseline"
-    "bench, 1M shuffled, predicate|1M_shuffled|predicate"
-    "bench, 10M sorted, baseline|10M_sorted|baseline"
-    "bench, 10M sorted, predicate|10M_sorted|predicate"
-    "bench, 10M shuffled, baseline|10M_shuffled|baseline"
-    "bench, 10M shuffled, predicate|10M_shuffled|predicate"
+    "bench\, 1M sorted\, baseline|1M_sorted|baseline"
+    "bench\, 1M sorted\, predicate|1M_sorted|predicate"
+    "bench\, 1M shuffled\, baseline|1M_shuffled|baseline"
+    "bench\, 1M shuffled\, predicate|1M_shuffled|predicate"
+    "bench\, 10M sorted\, baseline|10M_sorted|baseline"
+    "bench\, 10M sorted\, predicate|10M_sorted|predicate"
+    "bench\, 10M shuffled\, baseline|10M_shuffled|baseline"
+    "bench\, 10M shuffled\, predicate|10M_shuffled|predicate"
 )
 
 N_RUNS=${N_RUNS:-5}
